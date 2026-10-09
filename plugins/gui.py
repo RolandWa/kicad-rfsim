@@ -2908,11 +2908,19 @@ class ResultsFrame(wx.Frame):
             export_paraview = self._viewer().export_paraview
             xdmf_path = export_paraview(self.outdir, kind, port=port)
             h5_path = os.path.splitext(xdmf_path)[0] + ".h5"
+            vtr_path = os.path.splitext(xdmf_path)[0] + ".vtr"
+            scene_path = os.path.splitext(xdmf_path)[0] + "_scene.py"
+            has_scene = os.path.isfile(scene_path)
             viewer = r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe"
-            message = "ParaView export written:\n%s\n%s" % (xdmf_path, h5_path)
+            message = ("ParaView export written:\n%s\n%s\n%s\n\nThe .vtr file opens in ParaView as it is. "
+                       "For the .xdmf file choose the Xdmf3 reader, not the older XDMF Reader."
+                       % (vtr_path, xdmf_path, h5_path))
+            if has_scene:
+                message += ("\n\nThe layers, ports (Port 1, 2, ...), parts (R/L/C) and the field are in one "
+                            "scene: %s\nParaView starts with it; or use Tools > Python Shell > Run Script."
+                            % scene_path)
             if os.path.isfile(viewer):
-                subprocess.Popen([viewer, os.path.basename(xdmf_path)],
-                                 cwd=os.path.dirname(xdmf_path))  # ParaView splits a path at commas
+                self._viewer().launch_paraview(scene_path if has_scene else None, vtr_path)
                 wx.MessageBox(message, "RFsim", wx.ICON_INFORMATION)
             else:
                 wx.MessageBox(message, "RFsim", wx.ICON_INFORMATION)

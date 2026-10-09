@@ -33,6 +33,22 @@ gui = importlib.import_module("rfsim_pkg.gui")
 messages = []
 wx.MessageBox = lambda msg, *a, **k: messages.append(str(msg)) or 0
 target = {"path": None}
+# The button starts ParaView. The probe deletes its work folder when it ends, so a real ParaView
+# would open a window and report that its script is missing. Record the start instead.
+import subprocess  # noqa: E402
+
+launched = []
+_real_popen = subprocess.Popen
+
+
+def _popen(args, *a, **kw):
+    if isinstance(args, (list, tuple)) and str(args[0]).lower().endswith("paraview.exe"):
+        launched.append(list(args))
+        return types.SimpleNamespace(pid=0)
+    return _real_popen(args, *a, **kw)
+
+
+subprocess.Popen = _popen
 
 
 class FakeDialog:
@@ -78,7 +94,11 @@ def press(kind, what):
             ok = os.path.isfile(target["path"]) and os.path.getsize(target["path"]) > 2000
         else:
             frame._export_field_paraview(None)
-            ok = any(f.endswith(".xdmf") for _, _, fs in os.walk(work) for f in fs)
+            ok = all(any(f.endswith(ext) for _, _, fs in os.walk(work) for f in fs) for ext in (".xdmf", ".h5", ".vtr", "_scene.py", "geometry_ports.vtp"))
+        if what == "paraview":
+            script = [x for a in launched[-1:] for x in a if x.startswith("--script=")]
+            started = bool(script) and os.path.isfile(script[0].split("=", 1)[1]) and "," not in script[0]
+            print("ParaView start: %s %s" % ("OK" if started else "FAILED", script[0] if script else launched[-1:]))
         err = [m for m in messages if m.lower().startswith("could not") or "cannot be loaded" in m]
         print("%s %s: %s%s" % (kind, what, "OK" if ok and not err else "FAILED", " " + err[0][:140] if err else ""))
     except Exception:

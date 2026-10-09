@@ -86,7 +86,7 @@ The result window can reopen prior Touchstone data, save the selected E/H field 
 C:\openEMS\venv\Scripts\python.exe plugins\rfsim_viewer.py --export-paraview rfsim_results --field E --open-paraview
 ```
 
-ParaView opens the resulting `.xdmf` file, which refers to an adjacent HDF5 file with the real and imaginary vector components of the selected field.
+The export writes three files: a `.vtr` (VTK rectilinear grid, which ParaView opens as it is and which the button and `--open-paraview` start), and an `.xdmf` with an adjacent `.h5` holding the same arrays (`E_abs`, and the real and imaginary vector components). When ParaView asks which reader to use for the `.xdmf`, choose **Xdmf3**: the older "XDMF Reader" does not read the vectors and the plane shows no data. In ParaView press Apply, then colour by `E_abs` (or `H_abs`). The field grid is flat, at the height of the field plane (units mm). The export also writes the layer geometry of the same run: `geometry_copper_<layer>.vtp` for each copper layer, `geometry_dielectric.vtp`, `geometry_vias.vtp`, `geometry_ports.vtp` (a point and a line to the reference layer for each port) and `geometry_parts.vtp` (a line between the pads of each R/L/C part), and `<name>_scene.py`, a ParaView script that loads all of it with the field and puts a text label on each port ("Port 1: J1 Pad 1") and each part ("R2 100 ohm 0402"). The button and `--open-paraview` start ParaView with that script; in ParaView you can also run it with Tools > Python Shell > Run Script.
 
 ### Ports
 

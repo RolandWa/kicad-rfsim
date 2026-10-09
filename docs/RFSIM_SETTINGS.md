@@ -131,7 +131,7 @@ Use full-board mode for antennas and radiating structures. When copper, vias, or
 | `lines.json` | Extracted MSL/CPW/stripline impedance. |
 | `geometry_preview.xml` | AppCSXCAD geometry-only preview. |
 
-The results viewer can save a selected E/H field as GIF and export XDMF plus HDF5 for ParaView.
+The results viewer can save a selected E/H field as GIF and export VTK (`.vtr`), XDMF and HDF5 for ParaView. Open the `.vtr`, or open the `.xdmf` with the Xdmf3 reader (the older XDMF Reader shows no data); then Apply and colour by `E_abs` / `H_abs`. The export also writes the layers, vias, ports and parts as `geometry_*.vtp` and a scene script `<name>_scene.py` that loads them with the field and labels each port and R/L/C part (the button starts ParaView with it).
 
 ## References
 
