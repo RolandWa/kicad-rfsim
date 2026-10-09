@@ -883,6 +883,34 @@ def _touches(polys, box):
     return False
 
 
+# A reference layer must have copper under at least this fraction of the pad
+# for a Lumped or Microstrip port to have a return path there.
+REF_MIN_COVER = 0.5
+
+
+def _covered(polys, x, y):
+    """Tell if the point (x, y) is on the copper of `polys` (even-odd rule).
+
+    `_touches` compares bounding boxes only. A plane with a void under the
+    pad still has a bounding box that holds the pad, so `_touches` says
+    "copper" for a layer that has none at that point. This test follows the
+    real outline of the copper, including voids and cut-outs.
+    """
+    return len(_ray_hits(x, y, 0, 1, polys)) % 2 == 1
+
+
+def _coverage(polys, box, n=5):
+    """Give the fraction (0..1) of an n x n grid in `box` that is on copper."""
+    x0, y0, x1, y1 = box
+    on = 0
+    for i in range(n):
+        for j in range(n):
+            x = x0 + (x1 - x0) * (i + 0.5) / n
+            y = y0 + (y1 - y0) * (j + 0.5) / n
+            on += _covered(polys, x, y)
+    return on / float(n * n)
+
+
 def _pad_box(pad):
     """Give the bounding box of a pad as (x0, y0, x1, y1) in model mm."""
     bb = pad.GetBoundingBox()
@@ -1140,16 +1168,30 @@ def _port(board, pad, number, copper_layers, polygons):
     idx = names.index(layer_name)
     if len(names) < 2:
         raise ValueError("Board needs at least 2 copper layers (signal + reference)")
-    # Prefer the adjacent layer that has ground copper under the pad. The
-    # old rule always picked the layer toward B.Cu, which is wrong when
-    # THAT layer is an unrelated signal with no copper here and the real
-    # return plane is the layer toward F.Cu instead.
+    # **Pick the reference layer from the copper that is really under the
+    # pad.** A lumped port is a resistor from the pad down to its reference
+    # layer. If that layer has no copper at the pad, the resistor ends in
+    # air: no current flows and S11 reads as an open circuit. This happens
+    # when the inner planes are cut away under an RF line on purpose (to
+    # lower the capacitance of a connector pad) and the only ground is the
+    # coplanar pour on the signal layer and the plane on the far side. Thus
+    # test the coverage of the pad on each layer (`_coverage`, not the
+    # bounding box), nearest layer first; on a tie the layer toward B.Cu
+    # wins. A layer is good with `REF_MIN_COVER` of the pad covered.
+    box = _pad_box(pad)
+    others = [n for n in names if n != layer_name]
+    cover = {n: _coverage(polygons.get(n, []), box) for n in others}
+    order = sorted(others, key=lambda n: (abs(names.index(n) - idx),
+                                          0 if names.index(n) > idx else 1))
+    good = [n for n in order if cover[n] >= REF_MIN_COVER]
     down = names[idx + 1] if idx < len(names) - 1 else None
     up = names[idx - 1] if idx > 0 else None
-    box = _pad_box(pad)
-    down_ok = down is not None and _touches(polygons.get(down, []), box)
-    up_ok = up is not None and _touches(polygons.get(up, []), box)
-    ref = up if (up_ok and not down_ok) else (down if down is not None else up)
+    if good:
+        ref = good[0]
+    else:  # no layer qualifies: keep the old choice, extract() will warn
+        ref = down if down is not None else up
+    skipped = [(n, cover[n]) for n in order
+               if abs(names.index(n) - idx) < abs(names.index(ref) - idx)]
 
     # A stripline must have a plane above the strip and a plane below it.
     # Thus the port must be on an inner layer. openEMS puts the voltage
@@ -1183,6 +1225,8 @@ def _port(board, pad, number, copper_layers, polygons):
         "layer": layer_name,
         "ref_layer": ref,
         "ref_layer2": ref2,      # the second plane of a stripline
+        "ref_coverage": round(cover[ref], 3),   # share of the pad on copper of ref_layer
+        "ref_skipped": [[n, round(c, 3)] for n, c in skipped],  # nearer layers without copper
         "height": height,        # strip to each plane, mm; None = no stripline
         "asymmetry": round(asym, 4),
         "gap": None,             # the coplanar gap; extract() measures it
@@ -1364,8 +1408,28 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # ponytail: this is a test of the bounding boxes. Change it to a
     # point-in-polygon test if pours with unusual shapes give incorrect
     # results.
+    z_by_name = {c["name"]: c["z"] for c in copper_layers}
     for p, pad in zip(ports, pads):
-        if not _touches(polygons.get(p["ref_layer"], []), _pad_box(pad)):
+        for sk_name, sk_cov in p.get("ref_skipped") or []:
+            warnings.append(
+                "Port %d (%s): the nearer layer %s has copper under only "
+                "%.0f%% of the pad, so the port uses %s (%.0f%% covered, "
+                "%.3f mm from the pad). A lumped port that long adds "
+                "series inductance. If the feed line has coplanar ground "
+                "on its own layer, a \"Coplanar (CPW)\" port models the "
+                "return better."
+                % (p["number"], p["label"], sk_name, 100.0 * sk_cov,
+                   p["ref_layer"], 100.0 * p["ref_coverage"],
+                   abs(z_by_name[p["layer"]] - z_by_name[p["ref_layer"]])))
+            break
+        if 0.0 < p["ref_coverage"] < REF_MIN_COVER:
+            warnings.append(
+                "Port %d (%s): only %.0f%% of the pad is over copper of the "
+                "reference layer %s. The port may be at the edge of a "
+                "pour; check the S-parameters."
+                % (p["number"], p["label"], 100.0 * p["ref_coverage"],
+                   p["ref_layer"]))
+        if p["ref_coverage"] <= 0.0:
             # The return current of a CPW is on the coplanar ground of its
             # own layer. Thus a board with no plane below the pad is
             # correct for a CPW port, and the guard must not stop it. A CPW

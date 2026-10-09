@@ -194,6 +194,16 @@ Its row holds R in ohm, L in nH and C in pF, in series, with no parasitics. 0 le
 
 The fallback trend is informed by MLCC impedance data available through [KEMET K-SIM](https://ksim.kemet.com/) and [Murata SimSurfing](https://ds.murata.co.jp/simsurfing/en-us/). It is not an MPN-specific manufacturer model: ESR and ESL vary with capacitance, dielectric, voltage rating, DC bias, frequency, termination geometry, and test fixture. RFsim models PCB pads, tracks, and nearby via loops directly, so its table represents body-only ESL; copying a published mounted ESL value would double-count some board inductance. Use the per-component controls to enter values derived from the exact manufacturer part's impedance or S-parameter data.
 
+
+### Port reference layer and lumped elements: what openEMS needs
+
+openEMS does not check these, and a violation gives a wrong answer with no message of its own. RFsim now checks them and writes a warning to the log:
+
+* **A lumped or microstrip port is a resistor from the pad down to its reference layer.** If that layer has no copper under the pad, the resistor ends in air, no current flows, and the port reads as an open circuit (S = +1). Voided inner planes under an RF line (for example to lower the capacitance of a connector pad) cause exactly this.
+* **The reference layer is therefore picked from the copper that is really under the pad** (`board_reader._coverage`, a test on the true outline, not on the bounding box). The nearest layer with at least 50% of the pad covered is used; on a tie, the layer toward B.Cu. When a nearer layer is skipped, the log says so, with the distance of the port. A long lumped port adds series inductance. With coplanar ground on the signal layer, a **Coplanar (CPW)** port models the return better.
+* The runner repeats the test on the exported `model.json` (`runner._geometry_warnings`), so a model that was edited by hand, or made by an older version, is checked too.
+* **A lumped element (R, L, C) is a box on the main axes of the grid.** It must have both ends on copper, and the box must not be rotated or off the mesh lines (openEMS-Project discussion 186: rotated resistors had no effect). RFsim puts each part on the x or y axis and warns when an end of the box is not on copper.
+
 ## Examples
 
 The magnitude of S11 against the frequency:

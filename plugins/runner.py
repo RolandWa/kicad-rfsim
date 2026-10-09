@@ -342,6 +342,84 @@ def _element_ports(model):
             if refs is None or e.get("ref") in refs]
 
 
+def _on_copper(polys, x, y):
+    """Tell if (x, y) is on the copper of one layer (even-odd crossing test).
+
+    `polys` are the rings of one layer, in mm. A ray along +x counts the
+    edges that it crosses: an odd count is copper.
+    """
+    n = 0
+    for ring in polys:
+        prev = ring[-1]
+        for cur in ring:
+            if (prev[1] <= y) != (cur[1] <= y):
+                xc = prev[0] + (y - prev[1]) * (cur[0] - prev[0]) / (cur[1] - prev[1])
+                if xc > x:
+                    n += 1
+            prev = cur
+    return n % 2 == 1
+
+
+def _geometry_warnings(model):
+    """Give warnings about geometry on which openEMS gives a wrong answer
+    with no message of its own.
+
+    openEMS has these requirements, and it does not check them:
+
+    - A lumped port is a resistor from the pad to its reference layer. If
+      there is no copper on that layer under the port, the resistor ends in
+      air, no current flows, and the port reads as an open circuit (S = 1).
+    - A lumped element (R, L, C) is a box on the main axes of the grid. It
+      works only if both ends of the box are on copper. An end in air makes
+      an element that is not connected. A box that is rotated, or that is
+      not on mesh lines, is not modelled correctly
+      (openEMS-Project discussion 186).
+    """
+    out = []
+    polys = model.get("polygons", {})
+    for p in model.get("ports", []):
+        ref = p.get("ref_layer")
+        if p.get("type") in ("cpw",) or not ref:
+            continue
+        hw, hl = 0.5 * (p.get("length") or 0.0), 0.5 * (p.get("width") or 0.0)
+        pts = [(p["x"] + i * hw, p["y"] + j * hl)
+               for i in (-0.8, 0.0, 0.8) for j in (-0.8, 0.0, 0.8)]
+        on = sum(_on_copper(polys.get(ref, []), x, y) for x, y in pts)
+        if on == 0:
+            out.append(
+                "port %d (%s): there is NO copper on the reference layer %s "
+                "under the port. The port resistor ends in air, so this "
+                "port carries no current and its S-parameters show total "
+                "reflection (S = +1). Use a reference layer that has "
+                "copper there (for example B.Cu) or a Coplanar (CPW) port."
+                % (p["number"], p.get("label", ""), ref))
+    for e in model.get("lumped_elements", []):
+        if not e.get("type") or e.get("value") is None:
+            continue
+        layer = next((c["name"] for c in model["copper_layers"]
+                      if abs(c["z"] - e["start"][2]) < 1e-6), None)
+        if layer is None:
+            continue
+        cx = 0.5 * (e["start"][0] + e["stop"][0])
+        cy = 0.5 * (e["start"][1] + e["stop"][1])
+        d = 0.02
+        if e["ny"] == "x":
+            ends = ((min(e["start"][0], e["stop"][0]) - d, cy),
+                    (max(e["start"][0], e["stop"][0]) + d, cy))
+        else:
+            ends = ((cx, min(e["start"][1], e["stop"][1]) - d),
+                    (cx, max(e["start"][1], e["stop"][1]) + d))
+        bad = [i + 1 for i, (x, y) in enumerate(ends)
+               if not _on_copper(polys.get(layer, []), x, y)]
+        if bad:
+            out.append(
+                "lumped %s: end %s of the element box is not on copper of "
+                "%s, so the element hangs in air and does not connect its "
+                "pads (check the pad/pour outline at that end)."
+                % (e["ref"], " and ".join(map(str, bad)), layer))
+    return out
+
+
 def _ported_refs(model):
     """Give the refdes of the elements that became ports.
 
@@ -2126,6 +2204,8 @@ def main(model_path, outdir):
             "reads only version %d or lower. Update the plugin."
             % (os.path.basename(model_path), version, MODEL_VERSION))
     for w in model.get("warnings", []):
+        print("[rfsim] WARNING: %s" % w, flush=True)
+    for w in _geometry_warnings(model):
         print("[rfsim] WARNING: %s" % w, flush=True)
     s = model["settings"]
     # A part that is a port, or an open at all frequencies of the sweep, is
