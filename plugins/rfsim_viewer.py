@@ -205,7 +205,9 @@ def main():
                            port=args.port)
     print("ParaView XDMF: %s" % path)
     if args.open_paraview:
-        subprocess.Popen([r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe", path])
+        # ParaView splits a path at commas: start it in the folder with the bare file name
+        subprocess.Popen([r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe", os.path.basename(path)],
+                         cwd=os.path.dirname(os.path.abspath(path)))
 
 
 if __name__ == "__main__":

@@ -1215,6 +1215,38 @@ def _round_trip(d, make):
     return saved, again, notes
 
 
+def test_all_port_types_are_listed_and_the_unavailable_ones_are_refused():
+    d = dialog()
+    shown = []
+    gui_msgs = []
+    orig = wx.MessageBox
+    wx.MessageBox = lambda msg, *a, **k: gui_msgs.append(str(msg)) or 0
+    try:
+        for k, ch in enumerate(d.port_choices):
+            assert d.port_types[k] == [v for _, v in gui.PORT_TYPES], d.port_types[k]
+            assert ch.GetCount() == 4 and ch.IsEnabled(), "all 4 types are listed, the choice is open"
+            blocked = d.port_blocked[k]
+            assert "stripline" in blocked, "a pad on an outer layer has no stripline"
+            assert "plane above" in blocked["stripline"] or "feed line" in blocked["stripline"]
+            assert "lumped" not in blocked
+            shown.append(sorted(blocked))
+            # choosing an unavailable type puts the previous type back and says why
+            ch.SetSelection(d.port_types[k].index("stripline"))
+            fire(ch, wx.EVT_CHOICE)
+            assert d.port_types[k][ch.GetSelection()] == "lumped", ch.GetSelection()
+            assert gui_msgs and "Stripline" in gui_msgs[-1], gui_msgs
+            assert d.get_settings()["port_types"][k] == "lumped"
+            # a saved settings file may name an unavailable type: it is refused with a note
+            notes = []
+            d._apply_ports({"port_types": ["stripline"] * len(d.port_choices)}, notes)
+            assert any("not available" in n for n in notes), notes
+            assert d.port_types[k][ch.GetSelection()] == "lumped"
+    finally:
+        wx.MessageBox = orig
+        d.Destroy()
+    print("all 4 port types are listed, the unavailable ones are refused with the reason OK", shown)
+
+
 def test_settings_round_trip():
     """What the dialog saves, it loads back (this broke when the board stackup
     preset saved er/tand/h/cu_t = None and `float(None)` stopped the load)."""
@@ -1315,6 +1347,7 @@ if __name__ == "__main__":
     test_a_row_shows_only_the_fields_that_its_type_uses()
     test_open_parts_have_one_line()
     test_each_refusal_names_its_field()
+    test_all_port_types_are_listed_and_the_unavailable_ones_are_refused()
     test_settings_round_trip()
     test_settings_round_trip_ports_and_parts()
     print("PASS")

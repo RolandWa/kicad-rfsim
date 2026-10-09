@@ -103,6 +103,8 @@ The dialog gives only the types that the geometry permits:
 | Coplanar (CPW) Port   | Feed line on the x or y axis; Copper on both sides of it |
 | Stripline Port        | Feed line on the x or y axis; Plane above and below it   |
 
+The dialog always lists all four types. A type that the pad does not allow is marked "[unavailable]"; the tooltip of the list gives the reason, and choosing it keeps the previous type and shows the reason (for example, a stripline needs a plane above and below the strip, so a pad on an outer layer cannot have one).
+
 > Each excited port costs one full FDTD run. When a port gives out more power than it takes in, the plugin gives a warning: run again at the medium or the fine preset.
 
 ### The impedance of a line

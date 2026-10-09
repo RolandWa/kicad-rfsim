@@ -36,6 +36,7 @@ RFsim writes 401 linearly spaced points to the Touchstone result.
 | Microstrip | Requires an x/y feed direction and one reference plane. |
 | Coplanar | Requires an x/y feed and copper on both sides of the line. |
 | Stripline | Requires an x/y feed and reference planes above and below. |
+| Unavailable types | All four types are always listed. A type that the geometry does not allow is marked "[unavailable]"; the tooltip and the message on selection give the reason. |
 | Feed / Width | Manual feed definition for a pad with no detected track. |
 
 The selected pad needs a continuous local return path. Do not place a port across a reference-plane split or void.

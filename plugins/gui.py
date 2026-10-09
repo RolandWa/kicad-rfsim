@@ -281,6 +281,34 @@ def _port_choices(p):
     return out
 
 
+def _port_type_rows(p):
+    """Give (label, value, reason) of all the port types for the geometry in `p`.
+
+    `reason` is None when the type can be used. Else it tells why not, and the dialog shows
+    the type as unavailable instead of hiding it. The available rows are those of
+    `_port_choices`.
+    """
+    ok = {v: l for l, v in _port_choices(p)}
+    layer = p.get("layer") or "this layer"
+    reasons = {
+        "msl": "no feed line: draw a track at the pad or choose a direction in Feed",
+        "cpw": ("no feed line: draw a track at the pad or choose a direction in Feed"
+                if not p.get("direction") else
+                "no copper at the two sides of the feed line (coplanar gap)"),
+        "stripline": ("no feed line: draw a track at the pad or choose a direction in Feed"
+                      if not p.get("direction") else
+                      "needs a plane above and a plane below the strip; the pad is on "
+                      + layer + " (an inner layer is needed)"),
+    }
+    rows = []
+    for label, value in PORT_TYPES:
+        if value in ok:
+            rows.append((ok[value], value, None))
+        else:
+            rows.append(("%s [unavailable]" % label, value, reasons[value]))
+    return rows
+
+
 def _use_wxagg():
     """Select the wx backend of matplotlib, around a defect in wxPython.
 
@@ -421,7 +449,22 @@ class SettingsDialog(wx.Dialog):
         self.part_rows = []
         self._on_view_geometry = on_view_geometry
         self._on_open_results = on_open_results
-        self._build(ports, default_outdir, lumped, preview)
+        # The handlers that run while the dialog is built each asked for a layout (50 ms) and
+        # a redraw of the preview (1 s). They wait here and run once, at the end.
+        self._defer_redraw = True
+        try:
+            self._build(ports, default_outdir, lumped, preview)
+        finally:
+            self._defer_redraw = False
+        self.Layout()
+        self._redraw_preview()
+
+    def ShowModal(self):
+        """Show the dialog. The first paint of about a thousand controls is held back until
+        the dialog is shown, so that the buttons do not appear one after the other."""
+        self.Freeze()
+        wx.CallAfter(self.Thaw)
+        return wx.Dialog.ShowModal(self)
 
     def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
@@ -494,6 +537,8 @@ class SettingsDialog(wx.Dialog):
                       wx.TextCtrl(self, value="50"), "ohm")
         self.port_choices = []
         self.port_types = []  # the values of the choices of each port
+        self.port_blocked = []  # per port: {type: reason} of the types that are not available
+        self._last_type = []  # per port: the last valid selection of the type choice
         self.port_order = []
         self.port_excite = []
         # (the direction choice, the width field) of a pad that has no
@@ -520,6 +565,8 @@ class SettingsDialog(wx.Dialog):
             # direction, and the control must not change its dimension with
             # it. _set_type_choices fills the control below.
             self.port_types.append([])
+            self.port_blocked.append({})
+            self._last_type.append(0)
             ch = wx.Choice(self, size=(280, -1))
             exc = wx.CheckBox(self, label="Excite")
             exc.SetValue(True)
@@ -583,6 +630,7 @@ class SettingsDialog(wx.Dialog):
             self.port_order.append(num)
             self.port_excite.append(exc)
             self._set_type_choices(i, p)
+            ch.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_port_type(k))
             # The user can change the number of a port. Thus the label
             # must follow it, or it tells a number that is not correct.
             num.Bind(wx.EVT_CHOICE, self._on_port_number)
@@ -1225,7 +1273,28 @@ class SettingsDialog(wx.Dialog):
     # direction of a manual feed -> index of the direction choice (0 = "No Line")
     _FEED_INDEX = {(1, 0): 1, (-1, 0): 2, (0, 1): 3, (0, -1): 4}
 
+    def _layout(self, sizer=None):
+        """Lay out the dialog, or wait while the settings are loaded (a layout takes 50 ms here)."""
+        if not getattr(self, "_defer_redraw", False):
+            (sizer or self).Layout()
+
     def _apply_settings(self, saved):
+        """Put the settings into the dialog (see `_apply_settings_values`).
+
+        Every part row that changes its package asks for a redraw of the board preview,
+        and a redraw takes about a second on a real board: 56 parts took 95 s. The redraw
+        is held back here and made once at the end.
+        """
+        self._defer_redraw = True
+        try:
+            return self._apply_settings_values(saved)
+        finally:
+            self._defer_redraw = False
+            self._layout()
+            self._layout(self.part_area.GetSizer())
+            self._redraw_preview()
+
+    def _apply_settings_values(self, saved):
         """Put the settings that `get_settings` wrote into the dialog.
 
         It reads the files of this version and of older versions (a missing
@@ -1286,7 +1355,6 @@ class SettingsDialog(wx.Dialog):
         self._apply_parts(saved, notes)
         self._on_lumped(None)
         self._on_subregion_change(wx.CommandEvent())
-        self._redraw_preview()
         return notes
 
     def _apply_substrate(self, saved, notes):
@@ -1338,8 +1406,9 @@ class SettingsDialog(wx.Dialog):
         if isinstance(types, list) and len(types) == n:
             for k, tp in enumerate(types):
                 vals = self.port_types[k]
-                if tp in vals:
+                if tp in vals and tp not in self.port_blocked[k]:
                     self.port_choices[k].SetSelection(vals.index(tp))
+                    self._last_type[k] = vals.index(tp)
                 else:
                     notes.append('port %d: type "%s" is not available for this pad' % (k + 1, tp))
         elif types is not None:
@@ -1401,7 +1470,7 @@ class SettingsDialog(wx.Dialog):
         self.subregion_info.SetLabel(_port_subregion_text(
             self._preview_ports, self.margin.GetValue(), self._preview_lumped,
             pml))
-        self.Layout()
+        self._layout()
         evt.Skip()
 
     def _on_port_number(self, evt):
@@ -1429,20 +1498,37 @@ class SettingsDialog(wx.Dialog):
     def _set_type_choices(self, k, p):
         """Fill the type choice of row k for the geometry in `p`.
 
-        The selection stays on the same type when the new list has it. A
-        type that went away changes to Lumped. The control goes off when
-        Lumped is the one entry.
+        All the types are listed. A type that the geometry does not allow is marked
+        "[unavailable]"; choosing it puts the previous type back and tells why
+        (`_on_port_type`). The selection stays on the same type when it is still available;
+        else it changes to Lumped.
         """
-        rows = _port_choices(p)
+        rows = _port_type_rows(p)
         ch = self.port_choices[k]
-        old = self.port_types[k]
-        cur = old[ch.GetSelection()] if old and ch.GetSelection() >= 0 \
-            else "lumped"
-        self.port_types[k] = [v for _, v in rows]
-        ch.Set([label for label, _ in rows])
+        old, blocked = self.port_types[k], self.port_blocked[k]
+        cur = old[ch.GetSelection()] if old and ch.GetSelection() >= 0             else "lumped"
+        self.port_types[k] = [v for _, v, _ in rows]
+        self.port_blocked[k] = {v: why for _, v, why in rows if why}
+        ch.Set([label for label, _, _ in rows])
         ch.SetSelection(self.port_types[k].index(cur)
-                        if cur in self.port_types[k] else 0)
-        ch.Enable(len(rows) > 1)
+                        if cur in self.port_types[k] and cur not in self.port_blocked[k] else 0)
+        self._last_type[k] = ch.GetSelection()
+        names = {v: l for l, v in PORT_TYPES}
+        ch.SetToolTip("\n".join("%s: %s" % (names[v], why)
+                                for v, why in self.port_blocked[k].items()) or "Port type")
+
+    def _on_port_type(self, k):
+        """Put the previous type back when an unavailable type is chosen, and say why."""
+        ch = self.port_choices[k]
+        value = self.port_types[k][ch.GetSelection()]
+        why = self.port_blocked[k].get(value)
+        if why:
+            ch.SetSelection(self._last_type[k])
+            wx.MessageBox("Port %d: %s port is not available: %s."
+                          % (self.port_order[k].GetSelection() + 1,
+                             dict((v, l) for l, v in PORT_TYPES)[value], why),
+                          "RFsim", wx.ICON_INFORMATION)
+        self._last_type[k] = ch.GetSelection()
 
     def _feed_of(self, i):
         """Give (direction, width in mm) of a manual feed, or give None.
@@ -1482,7 +1568,7 @@ class SettingsDialog(wx.Dialog):
             if not p.get("direction"):
                 label += " [No Track]"
             badge.SetLabel(label)
-        self.Layout()
+        self._layout()
 
     def _any_modelled(self):
         """Tell if the model contains one lumped element or more."""
@@ -1562,7 +1648,7 @@ class SettingsDialog(wx.Dialog):
         avail = max(240, area.GetHeight() - 40)
         if h > avail:
             self.SetSize((w, avail))
-            self.Layout()
+            self._layout()
 
     def _lumped_limit(self):
         """Give (the timestep factor, the source, the value, the row).
@@ -1800,7 +1886,7 @@ class SettingsDialog(wx.Dialog):
                                 self.part_area.GetMinSize().GetWidth() - 4,
                                 wx.ClientDC(label)).rstrip("\n"))
         label.SetMinSize((0, label.GetBestSize().GetHeight()))
-        self.Layout()
+        self._layout()
         # **Paint all the dialog again.** A new warning makes its box
         # taller, and the Layout moves the controls. The window of the
         # rows then kept areas that it did not paint again: the label of a
@@ -1826,7 +1912,7 @@ class SettingsDialog(wx.Dialog):
             MESH_LEVELS[self.mesh.GetSelection()]))
 
     def _redraw_preview(self):
-        if self._prev_fig is None:
+        if self._prev_fig is None or getattr(self, "_defer_redraw", False):
             return
         self._prev_fig.clear()
         ax = self._prev_fig.add_axes((0.01, 0.01, 0.98, 0.98))
@@ -2168,7 +2254,7 @@ class SettingsDialog(wx.Dialog):
         for field in r["rlc"].values():
             field.Enable(self.para_rows[i][1].GetValue())
         self._update_lumped_warning()
-        self.Layout()
+        self._layout()
         # The row changed its controls, thus paint the dialog again. If
         # not, areas of the rows that did not move stay empty.
         self.Refresh()
@@ -2214,7 +2300,7 @@ class SettingsDialog(wx.Dialog):
         r["area"].Show(r["para"], not rlc)
         if not rlc:
             self._show_fields(r, kind)
-        self.part_area.GetSizer().Layout()
+        self._layout(self.part_area.GetSizer())
         self.part_area.FitInside()
 
     @staticmethod
@@ -2825,7 +2911,8 @@ class ResultsFrame(wx.Frame):
             viewer = r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe"
             message = "ParaView export written:\n%s\n%s" % (xdmf_path, h5_path)
             if os.path.isfile(viewer):
-                subprocess.Popen([viewer, xdmf_path])
+                subprocess.Popen([viewer, os.path.basename(xdmf_path)],
+                                 cwd=os.path.dirname(xdmf_path))  # ParaView splits a path at commas
                 wx.MessageBox(message, "RFsim", wx.ICON_INFORMATION)
             else:
                 wx.MessageBox(message, "RFsim", wx.ICON_INFORMATION)

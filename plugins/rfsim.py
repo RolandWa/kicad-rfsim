@@ -265,6 +265,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         preview = board_reader.extract(board, pads, 1.0, live_stackup=live)
         default_out = os.path.join(
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
+        busy = wx.BusyInfo("RFsim: the dialog is being prepared...")
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
                                  preview.get("lumped_elements", []),
                                  preview=preview,
@@ -274,6 +275,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                      board, pads, settings, live),
                                  on_open_results=lambda path: gui.ResultsFrame(
                                      None, path).Show())
+        del busy
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
