@@ -277,6 +277,8 @@ The boxes of the ports and the mesh lines, with no solver run. It takes seconds.
 Lists each board whose mesh changes against a git revision (HEAD by default). Use it to see which results a change can move before you run the solver.
 * **`via_nodes.py [-v] [revision]`** (solver Python)  
 Counts the mesh nodes in the barrel of each via. A via with no node conducts nothing. It takes a revision in the same way as `mesh_diff.py`.
+* **`test_four_layer.py [--no-solver]`** (python of KiCad; about 1.5 min with the solver)  
+The simplest board with 4 copper layers (`make_test_board.make_four_layer`: 14 x 8 mm, In1.Cu and In2.Cu cut away under the line). It tests the choice of B.Cu as the reference of the ports, the 0.1 mm prepreg stackup that once made openEMS drop all the copper, a 2-excitation solver run (passive, reciprocal, the line conducts), the viewer (GIF, ParaView) and the unit tests of `_stackup_from_text`, `_parse_value` and `_add_shape`. `probe_field_export.py` presses the field export buttons with the plugin imported as a package, as KiCad does.
 * **`test_subregion.py`**
 The port-focused rectangle and R/L/C filter. It verifies the margin/PML expansion, inclusion of a local component, and exclusion of a remote component. Run it with the Python of KiCad.
 * **`run_headless.py [mesh] [msl|lumped]`**  

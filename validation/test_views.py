@@ -72,10 +72,14 @@ def test_the_decisions_are_a_view():
     """
     import shutil
     import tempfile
-    f = frame()
-    assert gui.DECISIONS_VIEW not in f.choice.GetStrings(), \
-        "a run with no optimizations.log must have no such view"
-    f.Destroy()
+    # a COPY of the run without the log: out_coarse keeps the log of the last run
+    # of run_headless.py, which a current runner always writes
+    with tempfile.TemporaryDirectory() as old:
+        shutil.copy(os.path.join(OUT, "results.s2p"), old)
+        f = gui.ResultsFrame(None, os.path.join(old, "results.s2p"))
+        assert gui.DECISIONS_VIEW not in f.choice.GetStrings(), \
+            "a run with no optimizations.log must have no such view"
+        f.Destroy()
     log = "RFsim: the choices\n\ntimestep: the full Courant step\n"
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(os.path.join(OUT, "results.s2p"), tmp)

@@ -1204,6 +1204,89 @@ def test_each_refusal_names_its_field():
     print("each refusal names its field OK (7 fields)")
 
 
+def _round_trip(d, make):
+    """get_settings -> JSON -> a NEW dialog -> _apply_settings -> get_settings."""
+    import json
+    saved = json.loads(json.dumps(d.get_settings()))
+    d2 = make()
+    notes = d2._apply_settings(saved)
+    again = json.loads(json.dumps(d2.get_settings()))
+    d2.Destroy()
+    return saved, again, notes
+
+
+def test_settings_round_trip():
+    """What the dialog saves, it loads back (this broke when the board stackup
+    preset saved er/tand/h/cu_t = None and `float(None)` stopped the load)."""
+    # 1. the stackup of the board: er / tand / h / cu_t are None
+    d = dialog(stackup=ROGERS)
+    assert d.uses_board_stackup()
+    d.mesh.SetSelection(gui.MESH_LEVELS.index("ultrafine"))
+    d.f_stop.ChangeValue("8")
+    saved, again, notes = _round_trip(d, lambda: dialog(stackup=ROGERS))
+    assert saved["er"] is None and again["er"] is None, (saved["er"], again["er"])
+    assert again["mesh"] == "ultrafine" and abs(again["f_stop"] - 8e9) < 1, again["mesh"]
+    assert not notes, notes
+    d.Destroy()
+    # 2. FR-4 preset and a custom substrate
+    d = dialog()
+    d.er.ChangeValue("3.9")
+    d._on_substrate_edit(wx.CommandEvent())
+    d.h.ChangeValue("0.8")
+    saved, again, notes = _round_trip(d, dialog)
+    for k in ("er", "tand", "h", "cu_t", "f_start", "f_stop", "z0", "margin_mm", "mesh",
+              "max_timesteps", "end_criteria", "time_step_factor", "threads"):
+        assert saved[k] == again[k], (k, saved[k], again[k])
+    d.Destroy()
+    # 3. a file for the stackup of the board loaded on a board that has none: a note, no failure
+    d = dialog(stackup=ROGERS)
+    saved = d.get_settings()
+    d.Destroy()
+    d3 = dialog()
+    notes = d3._apply_settings(saved)
+    assert any("stackup" in n for n in notes), notes
+    d3.Destroy()
+    print("settings round trip OK (board stackup, custom substrate, missing stackup)")
+
+
+def test_settings_round_trip_ports_and_parts():
+    """Port types, numbers, excitation and the rows of the parts come back."""
+    import json
+    d = dialog(extra=[unknown("D1")])
+    # port 2 is not excited, the numbers are swapped
+    d.port_excite[1].SetValue(False)
+    d.port_order[0].SetSelection(1)
+    d.port_order[1].SetSelection(0)
+    # D1: a series RLC with R = 1 ohm, L = 2 nH, C = 3 pF
+    i = [r[0] for r in d.para_rows].index("D1")
+    d.part_rows[i]["kind"].SetSelection(gui.KIND_ORDER.index(gui.RLC_KIND))
+    d._on_kind(i)
+    d.para_rows[i][1].SetValue(True)
+    for k, v in (("R", "1"), ("L", "2"), ("C", "3")):
+        d.part_rows[i]["rlc"][k].ChangeValue(v)
+    # R1: a 0603 package with a typed ESL
+    r1 = [r[0] for r in d.para_rows].index("R1")
+    d.para_rows[r1][2].SetSelection(d.para_rows[r1][2].GetStrings().index("0603 Package"))
+    d._on_package(r1)
+    saved = json.loads(json.dumps(d.get_settings()))
+    d2 = dialog(extra=[unknown("D1")])
+    notes = d2._apply_settings(saved)
+    again = json.loads(json.dumps(d2.get_settings()))
+    for k in ("port_types", "port_feed", "order", "excite"):
+        assert saved[k] == again[k], (k, saved[k], again[k])
+    for ref in ("R1", "D1"):
+        a, b = saved["lumped_parasitics"][ref], again["lumped_parasitics"][ref]
+        for key in ("model", "type", "package", "value", "esl", "esr", "r", "l", "c"):
+            if key in a:
+                x, y = a[key], b.get(key)
+                ok = (x == y) if not isinstance(x, float) else abs(x - (y or 0.0)) <= 1e-9 * max(1.0, abs(x))
+                assert ok, (ref, key, x, y)
+    assert not notes, notes
+    d.Destroy()
+    d2.Destroy()
+    print("settings round trip OK (ports, series RLC, package)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_preset_holds_the_package()
@@ -1232,4 +1315,6 @@ if __name__ == "__main__":
     test_a_row_shows_only_the_fields_that_its_type_uses()
     test_open_parts_have_one_line()
     test_each_refusal_names_its_field()
+    test_settings_round_trip()
+    test_settings_round_trip_ports_and_parts()
     print("PASS")

@@ -303,6 +303,59 @@ def make_stripline(path):
     return board, pads
 
 
+FL_W, FL_L, FL_H = 14.0, 8.0, 4.0        # the board of make_four_layer(): size and the line y
+FL_TRACE = 0.4                            # width of the line on F.Cu (mm)
+
+
+def make_four_layer(path, void=True):
+    """The simplest board with 4 copper layers, for a fast run (14 x 8 mm, a line of 10 mm).
+
+    F.Cu holds a line of 0.4 mm between two pads and a ground pour around it (a coplanar
+    ground). B.Cu is a full ground plane. With `void=True` In1.Cu and In2.Cu are ground
+    pours with a notch of 3 mm cut away under the line and the two pads, as on boards that
+    cut the inner planes under an RF launch to lower its capacitance: the only plane that
+    is really under the pads is then B.Cu, two layers away. Four stitching vias join the
+    grounds. No part, no mask, no stackup block: `extract()` reads the default.
+    """
+    board = pcbnew.NewBoard(path)
+    board.SetCopperLayerCount(4)
+    rf = pcbnew.NETINFO_ITEM(board, "RF")
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    board.Add(rf)
+    board.Add(gnd)
+    pad1 = _pad_fp(board, "P1", 2.0, FL_H, rf, size=0.6)
+    pad2 = _pad_fp(board, "P2", 12.0, FL_H, rf, size=0.6)
+    t = pcbnew.PCB_TRACK(board)
+    t.SetStart(VECTOR2I(FromMM(2.0), FromMM(FL_H)))
+    t.SetEnd(VECTOR2I(FromMM(12.0), FromMM(FL_H)))
+    t.SetWidth(FromMM(FL_TRACE))
+    t.SetLayer(pcbnew.F_Cu)
+    t.SetNetCode(rf.GetNetCode())
+    board.Add(t)
+    full = [(0, 0), (FL_W, 0), (FL_W, FL_L), (0, FL_L)]
+    notch = [(0, 0), (FL_W, 0), (FL_W, FL_L), (0, FL_L), (0, FL_H + 1.5),
+             (FL_W - 1.0, FL_H + 1.5), (FL_W - 1.0, FL_H - 1.5), (0, FL_H - 1.5)]
+    _edge_cuts(board, full)
+    zones = [(pcbnew.F_Cu, full), (pcbnew.B_Cu, full)]
+    zones += [(pcbnew.In1_Cu, notch if void else full), (pcbnew.In2_Cu, notch if void else full)]
+    for layer, corners in zones:
+        z = _zone(board, layer, gnd, corners)
+        z.SetLocalClearance(FromMM(0.2))
+        z.SetMinThickness(FromMM(0.1))
+        z.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_NEVER)
+    for x, y in ((1.0, 1.0), (FL_W - 1.0, 1.0), (1.0, FL_L - 1.0), (FL_W - 1.0, FL_L - 1.0)):
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(VECTOR2I(FromMM(x), FromMM(y)))
+        v.SetViaType(pcbnew.VIATYPE_THROUGH)
+        v.SetDrill(FromMM(0.6))
+        v.SetWidth(FromMM(1.0))
+        v.SetNetCode(gnd.GetNetCode())
+        board.Add(v)
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    pcbnew.SaveBoard(path, board)
+    return board, [pad1, pad2]
+
+
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else \
         os.path.join(os.path.dirname(__file__), "microstrip_50ohm.kicad_pcb")

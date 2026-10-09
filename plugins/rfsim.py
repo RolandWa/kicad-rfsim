@@ -15,43 +15,121 @@ from . import board_reader, gui, solverenv
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 
-def _preview_geometry(board, pads, settings):
-    """Export the current dialog geometry to XML and open AppCSXCAD."""
+def _build_model(board, pads, settings, live=False):
+    """Make the model of a run from the settings of the dialog.
+
+    `_run` (the run) and `_preview_geometry` (View Exported Geometry) both call this, so the
+    preview shows what the run will simulate. Before, the preview had a copy of this code with
+    the substrate dict passed to `extract()` as it came from the dialog: with the preset
+    "KiCad's Stackup" its values are None and the preview stopped with a message about a
+    float and a NoneType.
+
+    Returns (model, outdir, separate_run_folder, pads in the order of the ports). The folder of
+    the run is not made here.
+    """
     settings = dict(settings)
     port_types = settings.pop("port_types")
     port_feed = settings.pop("port_feed")
+    # the numbers from the dialog: pad i becomes port order[i], and the
+    # types and the manual feeds move with the pads
     order = settings.pop("order")
-    pads = [p for _, p in sorted(zip(order, pads), key=lambda item: item[0])]
-    port_types = [p for _, p in sorted(zip(order, port_types), key=lambda item: item[0])]
-    port_feed = [p for _, p in sorted(zip(order, port_feed), key=lambda item: item[0])]
+    pads = [p for _, p in sorted(zip(order, pads), key=lambda t: t[0])]
+    port_types = [t for _, t in
+                  sorted(zip(order, port_types), key=lambda t: t[0])]
+    port_feed = [f for _, f in
+                 sorted(zip(order, port_feed), key=lambda t: t[0])]
     outdir = settings.pop("outdir")
-    substrate = {key: settings.pop(key) for key in ("er", "tand", "h", "cu_t")}
-    parasitics = settings.pop("lumped_parasitics", None) or {}
+    separate_run_folder = bool(settings.pop("separate_run_folder", True))
+    substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
+    # **None is the "KiCad's Stackup" preset of the dialog.** The
+    # substrate goes to extract() as None. Thus the (stackup ...) block
+    # of the board gives each layer its own er, tan d and thickness. It
+    # is the block of the saved file, or of the board in memory if the
+    # user selected the new values above. model["stackup_source"]
+    # becomes "file" or "memory".
+    if any(v is None for v in substrate.values()):
+        substrate = None
+    # The parasitics of each R/L/C part, from the rows of the dialog.
+    # They go into the elements below, and not into the settings:
+    # model.json must hold the values that the solver uses.
+    para = settings.pop("lumped_parasitics", None) or {}
+
     subregion = bool(settings.pop("port_focused_subregion", False))
-    model = board_reader.extract(board, pads, settings["margin_mm"], substrate,
+    # `f_stop` and `mesh` set the dimension of the PML band. Thus the
+    # domain holds the clear air AND the absorber: refer to
+    # `solverenv.pml_depth`.
+    model = board_reader.extract(board, pads, settings["margin_mm"],
+                                 substrate, live_stackup=live,
+                                 f_stop=settings["f_stop"],
+                                 mesh=settings["mesh"],
                                  full_board=not subregion)
-    for element in model["lumped_elements"]:
-        chosen = parasitics.get(element["ref"])
-        if chosen:
-            element.update(package=chosen["package"], esl=chosen["esl"],
-                           esr=chosen["esr"])
-            if chosen.get("type"):
-                element["type"] = chosen["type"]
-            if chosen.get("value") is not None:
-                element["value"] = chosen["value"]
+    for e in model["lumped_elements"]:
+        v = para.get(e["ref"])
+        if v:
+            e.update(package=v["package"], esl=v["esl"], esr=v["esr"],
+                     epc=v.get("epc"))
+            # When the refdes of a part does not give the type, the
+            # part comes back from extract() with type None and value
+            # None. The user selected them in the dialog, thus they go
+            # in here. A part that the board gives keeps its own
+            # values, and the dialog gives None for the two.
+            if v.get("type"):
+                e["type"] = v["type"]
+            if v.get("value") is not None:
+                e["value"] = v["value"]
+            # A series RLC part gives R, L and C and no single value.
+            # The three are only in the model: the board file does not
+            # change, and `board_reader` reads no new data.
+            if e["type"] == "RLC":
+                e.update(value=None, r=v.get("r"), l=v.get("l"),
+                         c=v.get("c"))
+    # When the Model checkbox of a part is off, the part does not go
+    # into the model. Its pads stay in the copper, thus the gap between
+    # them stays open. This is the same result as the checkbox of
+    # before for all the parts. The runner does not have a test of its
+    # own for it.
     model["lumped_elements"] = [
-        element for element in model["lumped_elements"]
-        if parasitics.get(element["ref"], {}).get("model", True)
-        and element.get("type") and element.get("value") is not None]
-    for port, port_type, feed in zip(model["ports"], port_types, port_feed):
-        port["type"] = port_type
-        if feed and not port["direction"]:
-            port["direction"], port["track_width"] = feed
-            key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y", (0, -1): "-y"}[tuple(port["direction"])]
-            port["gap"] = (port.get("gaps") or {}).get(key)
-            port["copper_run"] = board_reader.copper_run(
-                model["polygons"].get(port["layer"], []), port["x"], port["y"], port["direction"])
+        e for e in model["lumped_elements"]
+        if para.get(e["ref"], {}).get("model", True)
+        and e.get("type")
+        and (e.get("value") is not None or e["type"] == "RLC")]
+    for p, t, f in zip(model["ports"], port_types, port_feed):
+        p["type"] = t
+        if f and not p["direction"]:
+            # The manual feed of the dialog: the pad has no track. The
+            # user gave the direction and the width of a line that the
+            # board shows as a shape or as a polygon. The gap of that
+            # direction comes from extract(). Thus a CPW that the user
+            # drew keeps its measured gap.
+            p["direction"], p["track_width"] = f
+            key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y",
+                   (0, -1): "-y"}[tuple(p["direction"])]
+            p["gap"] = (p.get("gaps") or {}).get(key)
+            # `extract()` measured the copper run for the direction
+            # of a TRACK, and this pad had none. Measure it for the
+            # direction that the user gave, or the runner cannot cap
+            # the length of the port.
+            p["copper_run"] = board_reader.copper_run(
+                model["polygons"].get(p["layer"], []),
+                p["x"], p["y"], p["direction"])
+            if (t in ("msl", "cpw", "stripline")
+                    and not board_reader.copper_along(
+                        model["polygons"].get(p["layer"], []),
+                        p["x"], p["y"], p["direction"])):
+                model["warnings"].append(
+                    "Port %d: there is no copper along the manual "
+                    "feed direction. The %s port adds its own strip "
+                    "there, thus the simulated board is different "
+                    "from the board in KiCad. Examine the direction, "
+                    "or add the feed line to the board."
+                    % (p["number"], t))
     model["settings"] = settings
+    return model, outdir, separate_run_folder, pads
+
+
+def _preview_geometry(board, pads, settings, live=False):
+    """Export the current dialog geometry to XML and open AppCSXCAD."""
+    model, outdir, _, _ = _build_model(board, pads, settings, live)
     os.makedirs(outdir, exist_ok=True)
     model_path = os.path.join(outdir, "geometry_preview_model.json")
     geometry_path = os.path.join(outdir, "geometry_preview.xml")
@@ -193,7 +271,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                  packages=board_reader.package_presets(),
                                  esr=board_reader.esr_presets(),
                                  on_view_geometry=lambda settings: _preview_geometry(
-                                     board, pads, settings),
+                                     board, pads, settings, live),
                                  on_open_results=lambda path: gui.ResultsFrame(
                                      None, path).Show())
         if dlg.ShowModal() != wx.ID_OK:
@@ -202,108 +280,13 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         settings = dlg.get_settings()
         dlg.Destroy()
 
-        port_types = settings.pop("port_types")
-        port_feed = settings.pop("port_feed")
-        # the numbers from the dialog: pad i becomes port order[i], and the
-        # types and the manual feeds move with the pads
-        order = settings.pop("order")
-        pads = [p for _, p in sorted(zip(order, pads), key=lambda t: t[0])]
-        port_types = [t for _, t in
-                      sorted(zip(order, port_types), key=lambda t: t[0])]
-        port_feed = [f for _, f in
-                     sorted(zip(order, port_feed), key=lambda t: t[0])]
-        outdir = settings.pop("outdir")
-        separate_run_folder = bool(settings.pop("separate_run_folder", True))
+        model, outdir, separate_run_folder, pads = _build_model(board, pads, settings, live)
         if separate_run_folder:
             os.makedirs(outdir, exist_ok=True)
             outdir = _run_output_dir(outdir)
-        substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
-        # **None is the "KiCad's Stackup" preset of the dialog.** The
-        # substrate goes to extract() as None. Thus the (stackup ...) block
-        # of the board gives each layer its own er, tan d and thickness. It
-        # is the block of the saved file, or of the board in memory if the
-        # user selected the new values above. model["stackup_source"]
-        # becomes "file" or "memory".
-        if any(v is None for v in substrate.values()):
-            substrate = None
-        # The parasitics of each R/L/C part, from the rows of the dialog.
-        # They go into the elements below, and not into the settings:
-        # model.json must hold the values that the solver uses.
-        para = settings.pop("lumped_parasitics", None) or {}
-
-        subregion = bool(settings.pop("port_focused_subregion", False))
-        # `f_stop` and `mesh` set the dimension of the PML band. Thus the
-        # domain holds the clear air AND the absorber: refer to
-        # `solverenv.pml_depth`.
-        model = board_reader.extract(board, pads, settings["margin_mm"],
-                                     substrate, live_stackup=live,
-                                     f_stop=settings["f_stop"],
-                                     mesh=settings["mesh"],
-                                     full_board=not subregion)
-        for e in model["lumped_elements"]:
-            v = para.get(e["ref"])
-            if v:
-                e.update(package=v["package"], esl=v["esl"], esr=v["esr"],
-                         epc=v.get("epc"))
-                # When the refdes of a part does not give the type, the
-                # part comes back from extract() with type None and value
-                # None. The user selected them in the dialog, thus they go
-                # in here. A part that the board gives keeps its own
-                # values, and the dialog gives None for the two.
-                if v.get("type"):
-                    e["type"] = v["type"]
-                if v.get("value") is not None:
-                    e["value"] = v["value"]
-                # A series RLC part gives R, L and C and no single value.
-                # The three are only in the model: the board file does not
-                # change, and `board_reader` reads no new data.
-                if e["type"] == "RLC":
-                    e.update(value=None, r=v.get("r"), l=v.get("l"),
-                             c=v.get("c"))
-        # When the Model checkbox of a part is off, the part does not go
-        # into the model. Its pads stay in the copper, thus the gap between
-        # them stays open. This is the same result as the checkbox of
-        # before for all the parts. The runner does not have a test of its
-        # own for it.
-        model["lumped_elements"] = [
-            e for e in model["lumped_elements"]
-            if para.get(e["ref"], {}).get("model", True)
-            and e.get("type")
-            and (e.get("value") is not None or e["type"] == "RLC")]
-        for p, t, f in zip(model["ports"], port_types, port_feed):
-            p["type"] = t
-            if f and not p["direction"]:
-                # The manual feed of the dialog: the pad has no track. The
-                # user gave the direction and the width of a line that the
-                # board shows as a shape or as a polygon. The gap of that
-                # direction comes from extract(). Thus a CPW that the user
-                # drew keeps its measured gap.
-                p["direction"], p["track_width"] = f
-                key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y",
-                       (0, -1): "-y"}[tuple(p["direction"])]
-                p["gap"] = (p.get("gaps") or {}).get(key)
-                # `extract()` measured the copper run for the direction
-                # of a TRACK, and this pad had none. Measure it for the
-                # direction that the user gave, or the runner cannot cap
-                # the length of the port.
-                p["copper_run"] = board_reader.copper_run(
-                    model["polygons"].get(p["layer"], []),
-                    p["x"], p["y"], p["direction"])
-                if (t in ("msl", "cpw", "stripline")
-                        and not board_reader.copper_along(
-                            model["polygons"].get(p["layer"], []),
-                            p["x"], p["y"], p["direction"])):
-                    model["warnings"].append(
-                        "Port %d: there is no copper along the manual "
-                        "feed direction. The %s port adds its own strip "
-                        "there, thus the simulated board is different "
-                        "from the board in KiCad. Examine the direction, "
-                        "or add the feed line to the board."
-                        % (p["number"], t))
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
-        model["settings"] = settings
         model["run_output_dir"] = outdir
 
         os.makedirs(outdir, exist_ok=True)

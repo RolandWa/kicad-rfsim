@@ -1211,56 +1211,187 @@ class SettingsDialog(wx.Dialog):
         try:
             with open(dlg.GetPath(), encoding="utf-8") as fh:
                 saved = json.load(fh)
-            self._apply_settings(saved)
-        except (OSError, ValueError, TypeError) as exc:
+            if not isinstance(saved, dict):
+                raise ValueError("the file is not an RFsim settings file (no JSON object)")
+            notes = self._apply_settings(saved)
+            if notes:
+                wx.MessageBox("The settings were loaded, but:\n\n- " + "\n- ".join(notes),
+                              "RFsim", wx.ICON_INFORMATION)
+        except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
             wx.MessageBox("Could not load settings: %s" % exc, "RFsim", wx.ICON_ERROR)
         finally:
             dlg.Destroy()
 
+    # direction of a manual feed -> index of the direction choice (0 = "No Line")
+    _FEED_INDEX = {(1, 0): 1, (-1, 0): 2, (0, 1): 3, (0, -1): 4}
+
     def _apply_settings(self, saved):
-        """Apply scalar settings and component choices saved by this dialog."""
+        """Put the settings that `get_settings` wrote into the dialog.
+
+        It reads the files of this version and of older versions (a missing
+        key keeps the control as it is). It returns the list of things that
+        could not be applied, as text, for a message to the user.
+
+        What changed against the first version of this function:
+        * `er`, `tand`, `h`, `cu_t` are None when the run uses "KiCad's
+          Stackup"; `float(None)` made the whole load fail. The substrate
+          preset is selected from them now.
+        * the ports are restored too: type, manual feed, number, excite;
+        * a series RLC row, the SRF of an inductor, the type of a row are
+          restored with their fields shown;
+        * `threads` and `mesh` are checked against the choices.
+        """
+        notes = []
+
+        def number(key):
+            v = saved.get(key)
+            return None if v is None else float(v)
+
         for ctrl, key, scale in ((self.f_start, "f_start", 1e9),
                                  (self.f_stop, "f_stop", 1e9),
                                  (self.f_field, "f_field", 1e9),
-                                 (self.z0, "z0", 1.0), (self.er, "er", 1.0),
-                                 (self.tand, "tand", 1.0), (self.h, "h", 1.0),
-                                 (self.cu_t, "cu_t", 1.0)):
-            if key in saved:
-                ctrl.ChangeValue("%g" % (float(saved[key]) / scale))
-        self.margin.SetValue(float(saved.get("margin_mm", self.margin.GetValue())))
+                                 (self.z0, "z0", 1.0)):
+            v = number(key)
+            if v is not None:
+                ctrl.ChangeValue("%g" % (v / scale))
+        self._apply_substrate(saved, notes)
+        v = number("margin_mm")
+        if v is not None:
+            self.margin.SetValue(v)
         self.port_focused_subregion.SetValue(bool(saved.get(
             "port_focused_subregion", self.port_focused_subregion.GetValue())))
-        self.max_steps.ChangeValue(str(saved.get("max_timesteps", self.max_steps.GetValue())))
-        self.end_crit.ChangeValue("%g" % float(saved.get("end_criteria", self.end_crit.GetValue())))
+        if saved.get("max_timesteps") is not None:
+            self.max_steps.ChangeValue(str(int(float(saved["max_timesteps"]))))
+        v = number("end_criteria")
+        if v is not None:
+            self.end_crit.ChangeValue("%g" % v)
         tsf = saved.get("time_step_factor")
         self.tsf.ChangeValue("" if tsf is None else "%g" % float(tsf))
         if saved.get("mesh") in MESH_LEVELS:
             self.mesh.SetSelection(MESH_LEVELS.index(saved["mesh"]))
+        elif saved.get("mesh") is not None:
+            notes.append('mesh preset "%s" does not exist in this version' % saved["mesh"])
         thread = saved.get("threads")
-        self.threads.SetSelection(int(thread) if thread else 0)
-        self.outdir.SetPath(str(saved.get("outdir", self.outdir.GetPath())))
+        n_thr = self.threads.GetCount()
+        idx = int(thread) if thread else 0       # item i gives i threads, item 0 is Auto
+        if idx >= n_thr:
+            notes.append("%d threads are not available here; %d are used" % (idx, n_thr - 1))
+            idx = n_thr - 1
+        self.threads.SetSelection(max(idx, 0))
+        if saved.get("outdir"):
+            self.outdir.SetPath(str(saved["outdir"]))
         self.separate_run_folder.SetValue(bool(saved.get(
             "separate_run_folder", self.separate_run_folder.GetValue())))
-        saved_parts = saved.get("lumped_parasitics", {})
+        self._apply_ports(saved, notes)
+        self._apply_parts(saved, notes)
+        self._on_lumped(None)
+        self._on_subregion_change(wx.CommandEvent())
+        self._redraw_preview()
+        return notes
+
+    def _apply_substrate(self, saved, notes):
+        """Select the preset from er / tand / h / cu_t ("KiCad's Stackup" when they are None)."""
+        keys = ("er", "tand", "h", "cu_t")
+        if not any(k in saved for k in keys):
+            return
+        if all(saved.get(k) is None for k in keys):          # the stackup of the board
+            if self._board_substrate:
+                self.preset.SetSelection(0)
+            else:
+                self.preset.SetSelection(1)                  # FR-4
+                notes.append("the settings use the stackup of the board, but this board has none: FR-4 is used")
+            self._apply_preset()
+            return
+        er, tand = saved.get("er"), saved.get("tand")
+        sel = len(SUBSTRATE_PRESETS) - 1                     # Custom
+        for k, (name, e, td) in enumerate(SUBSTRATE_PRESETS):
+            if (e is not None and er is not None and tand is not None
+                    and abs(e - float(er)) < 1e-9 and abs(td - float(tand)) < 1e-12):
+                sel = k
+                break
+        self.preset.SetSelection(sel)
+        self._apply_preset()
+        for ctrl, key in ((self.er, "er"), (self.tand, "tand"), (self.h, "h"), (self.cu_t, "cu_t")):
+            if saved.get(key) is not None:
+                ctrl.ChangeValue("%g" % float(saved[key]))
+
+    def _apply_ports(self, saved, notes):
+        """Restore the manual feeds, the types, the numbers and the excitation of the ports."""
+        n = len(self.port_choices)
+        feeds, types = saved.get("port_feed"), saved.get("port_types")
+        if isinstance(feeds, list) and len(feeds) == n:
+            for k, fd in enumerate(feeds):
+                fc = self.port_feed[k]
+                if not fc:
+                    continue
+                dch, wtc = fc
+                if fd:
+                    direction, width = fd
+                    sel = self._FEED_INDEX.get((int(direction[0]), int(direction[1])), 0)
+                    dch.SetSelection(sel)
+                    wtc.ChangeValue("%g" % float(width))
+                else:
+                    dch.SetSelection(0)
+                self._on_feed(k)
+        elif feeds is not None:
+            notes.append("the settings are for %d ports, this board has %d: manual feeds not restored" % (len(feeds), n))
+        if isinstance(types, list) and len(types) == n:
+            for k, tp in enumerate(types):
+                vals = self.port_types[k]
+                if tp in vals:
+                    self.port_choices[k].SetSelection(vals.index(tp))
+                else:
+                    notes.append('port %d: type "%s" is not available for this pad' % (k + 1, tp))
+        elif types is not None:
+            notes.append("the settings are for %d ports, this board has %d: port types not restored" % (len(types), n))
+        order = saved.get("order")
+        if isinstance(order, list) and len(order) == n and sorted(int(v) for v in order) == list(range(1, n + 1)):
+            for ctrl, v in zip(self.port_order, order):
+                ctrl.SetSelection(int(v) - 1)
+        elif order is not None:
+            notes.append("port numbers not restored (the number of ports differs)")
+        exc = saved.get("excite")
+        if isinstance(exc, list):
+            want = {int(x) for x in exc}
+            for num, cb in zip(self.port_order, self.port_excite):
+                cb.SetValue((num.GetSelection() + 1) in want)
+        self._refresh_port_badges()
+
+    def _apply_parts(self, saved, notes):
+        """Restore the rows of the R/L/C parts: model, type, value, package, ESL, ESR, SRF, series RLC."""
+        saved_parts = saved.get("lumped_parasitics") or {}
         for index, (ref, check, package, esl, esr) in enumerate(self.para_rows):
             part = saved_parts.get(ref)
             if not part:
                 continue
+            row = self.part_rows[index]
+            kind = part.get("type")
+            if kind in KIND_ORDER:
+                row["kind"].SetSelection(KIND_ORDER.index(kind))
             check.SetValue(bool(part.get("model", check.GetValue())))
+            self._on_kind(index)
+            if kind == RLC_KIND:
+                for k, key in RLC_FIELDS:
+                    v = part.get(key)
+                    row["rlc"][k].ChangeValue("" if not v else "%g" % (float(v) / ENTRY_SCALE[k]))
+                continue
             package_name = part.get("package")
             if package_name in self._pkg_values:
                 package.SetSelection(self._pkg_values.index(package_name))
-            esl.ChangeValue("%g" % (float(part.get("esl", 0.0)) * 1e9))
-            esr.ChangeValue("%g" % float(part.get("esr", 0.0)))
-            kind = part.get("type")
-            if kind in KIND_ORDER:
-                self.part_rows[index]["kind"].SetSelection(KIND_ORDER.index(kind))
+                self._on_package(index)
+            elif package_name is not None:
+                notes.append('%s: package "%s" is not known' % (ref, package_name))
+            esl.ChangeValue("%g" % (float(part.get("esl") or 0.0) * 1e9))
+            esr.ChangeValue("%g" % float(part.get("esr") or 0.0))
             value = part.get("value")
             if value is not None and kind in ENTRY_SCALE:
-                self.part_rows[index]["value"].ChangeValue("%g" % (float(value) / ENTRY_SCALE[kind]))
-        self._on_lumped(None)
-        self._on_subregion_change(wx.CommandEvent())
-        self._redraw_preview()
+                row["value"].ChangeValue("%g" % (float(value) / ENTRY_SCALE[kind]))
+            epc = part.get("epc")
+            if kind == "L" and epc and value:
+                # C = 1 / ((2 pi f)^2 L)  ->  f = 1 / (2 pi sqrt(L C))
+                row["srf"].ChangeValue("%g" % (1e-9 / (2 * 3.141592653589793 * (float(value) * float(epc)) ** 0.5)))
+            elif kind == "L":
+                row["srf"].ChangeValue("")
 
     def _on_subregion_change(self, evt):
         try:
@@ -2634,11 +2765,24 @@ class ResultsFrame(wx.Frame):
             try:
                 from .rfsim_compare import ResultsComparisonFrame
             except ImportError:  # direct execution outside the plugin package
-                from rfsim_compare import ResultsComparisonFrame
+                from rfsim_compare import ResultsComparisonFrame  # noqa: F401
             ResultsComparisonFrame(self, paths).Show()
         except Exception as exc:
             wx.MessageBox("Could not compare results: %s" % exc,
                           "RFsim", wx.ICON_ERROR)
+
+    @staticmethod
+    def _viewer():
+        """Give the module rfsim_viewer: as a member of the plugin package, as KiCad
+        imports the plugin (the folder of the plugin is not on sys.path there), or as a
+        plain module when the files are run from their folder. A plain
+        `from rfsim_viewer import ...` raised ModuleNotFoundError inside KiCad, and the
+        button then did nothing and said nothing."""
+        try:
+            from . import rfsim_viewer
+        except ImportError:
+            import rfsim_viewer
+        return rfsim_viewer
 
     def _save_field_animation(self, evt):
         """Save the current E/H field phase animation as a GIF."""
@@ -2647,7 +2791,11 @@ class ResultsFrame(wx.Frame):
             wx.MessageBox("Select an E-Field or H-Field view first.", "RFsim",
                           wx.ICON_INFORMATION)
             return
-        from rfsim_viewer import save_animation
+        try:
+            save_animation = self._viewer().save_animation
+        except ImportError as exc:
+            wx.MessageBox("The field viewer cannot be loaded: %s" % exc, "RFsim", wx.ICON_ERROR)
+            return
         port_tag = "_port%d" % port if port else ""
         picker = wx.FileDialog(self, "Save RFsim field animation",
                                wildcard="GIF animation (*.gif)|*.gif",
@@ -2670,8 +2818,8 @@ class ResultsFrame(wx.Frame):
             wx.MessageBox("Select an E-Field or H-Field view first.", "RFsim",
                           wx.ICON_INFORMATION)
             return
-        from rfsim_viewer import export_paraview
         try:
+            export_paraview = self._viewer().export_paraview
             xdmf_path = export_paraview(self.outdir, kind, port=port)
             h5_path = os.path.splitext(xdmf_path)[0] + ".h5"
             viewer = r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe"
