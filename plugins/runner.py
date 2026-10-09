@@ -393,8 +393,18 @@ def _geometry_warnings(model):
                 "reflection (S = +1). Use a reference layer that has "
                 "copper there (for example B.Cu) or a Coplanar (CPW) port."
                 % (p["number"], p.get("label", ""), ref))
+    # A part that is a port, or an open at all frequencies, is not in the
+    # grid; an end that lies outside the exported region was cut by the
+    # domain, and the copper there is missing on purpose. Neither is a fault.
+    skip = _ported_refs(model) | _open_parts(model)
+    reg = model.get("region") or {}
+
+    def inside(x, y):
+        return (reg.get("x0", -1e9) <= x <= reg.get("x1", 1e9)
+                and reg.get("y0", -1e9) <= y <= reg.get("y1", 1e9))
+
     for e in model.get("lumped_elements", []):
-        if not e.get("type") or e.get("value") is None:
+        if not e.get("type") or e.get("value") is None or e.get("ref") in skip:
             continue
         layer = next((c["name"] for c in model["copper_layers"]
                       if abs(c["z"] - e["start"][2]) < 1e-6), None)
@@ -410,7 +420,7 @@ def _geometry_warnings(model):
             ends = ((cx, min(e["start"][1], e["stop"][1]) - d),
                     (cx, max(e["start"][1], e["stop"][1]) + d))
         bad = [i + 1 for i, (x, y) in enumerate(ends)
-               if not _on_copper(polys.get(layer, []), x, y)]
+               if inside(x, y) and not _on_copper(polys.get(layer, []), x, y)]
         if bad:
             out.append(
                 "lumped %s: end %s of the element box is not on copper of "
@@ -1649,7 +1659,8 @@ def _mesh(model, ports, res, notes=None):
     anchor_x = [(v, RANK_FACE) for v in le_x] + via_x
     anchor_y = [(v, RANK_FACE) for v in le_y] + via_y
     return (_merge_close(xs, tol, anchor_x), _merge_close(ys, tol, anchor_y),
-            _merge_close(zs, tol_z))
+            _merge_close(zs, tol_z,
+                         [(c["z"], RANK_FACE) for c in model["copper_layers"]]))
 
 
 def _epc_split(grid, e):

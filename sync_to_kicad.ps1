@@ -3,20 +3,24 @@
 # Copies plugins\*.py, plugins\assets and docs\RFSIM_SETTINGS.md into
 #   <3rdparty\plugins>\com_github_nbalciunas_kicad-rfsim
 # for each target below. The previous files are saved first in
-#   <plugin dir>\.backup-<yyyyMMdd-HHmmss>
-# (the 5 newest backups are kept). Close KiCad before you sync.
+#   <3rdparty>\plugin_backups\com_github_nbalciunas_kicad-rfsim\<yyyyMMdd-HHmmss>
+# (outside the plugin directory; the 5 newest are kept). Python files that are
+# in the plugin directory but no longer in the repository are removed (the
+# backup holds them). Close KiCad before you sync.
 #
 # Usage:
 #   .\sync_to_kicad.ps1                      # KiCad 9.0 and 10.0
 #   .\sync_to_kicad.ps1 -Versions 10.0       # one version
 #   .\sync_to_kicad.ps1 -Root "D:\KiCad"     # other root with <ver>\3rdparty\plugins
+#                                            (or set $env:KICAD_3RDPARTY_ROOT)
 #   .\sync_to_kicad.ps1 -WhatIf              # show what would be copied
 
 param(
     [string[]]$Versions = @("9.0", "10.0"),
     # Root that holds <version>\3rdparty\plugins. Default: ...\Simulation tools\KiCad
     # (two levels above this repo); falls back to %APPDATA%\kicad when absent.
-    [string]$Root = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "KiCad"),
+    [string]$Root = $(if ($env:KICAD_3RDPARTY_ROOT) { $env:KICAD_3RDPARTY_ROOT }
+                      else { Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "KiCad" }),
     [switch]$WhatIf
 )
 
@@ -47,14 +51,16 @@ foreach ($v in $Versions) {
     $dst = Join-Path $plugins $PluginDir
     Write-Host "`n[*] KiCad $v -> $dst" -ForegroundColor Cyan
 
+    $bakRoot = Join-Path (Split-Path $plugins -Parent) "plugin_backups\$PluginDir"
+    $bak = Join-Path $bakRoot $stamp
     if (Test-Path $dst) {
-        $bak = Join-Path $dst ".backup-$stamp"
         if (-not $WhatIf) {
             New-Item -ItemType Directory -Path $bak -Force | Out-Null
             Get-ChildItem $dst -File -Filter *.py | Copy-Item -Destination $bak
-            if (Test-Path (Join-Path $dst "assets")) { Copy-Item (Join-Path $dst "assets") $bak -Recurse }
-            if (Test-Path (Join-Path $dst "docs"))   { Copy-Item (Join-Path $dst "docs") $bak -Recurse }
-            Get-ChildItem $dst -Directory -Filter ".backup-*" | Sort-Object Name -Descending |
+            foreach ($d in "assets", "docs") {
+                if (Test-Path (Join-Path $dst $d)) { Copy-Item (Join-Path $dst $d) $bak -Recurse }
+            }
+            Get-ChildItem $bakRoot -Directory | Sort-Object Name -Descending |
                 Select-Object -Skip $Keep | Remove-Item -Recurse -Force
         }
         Write-Host "    backup: $bak" -ForegroundColor Gray
@@ -63,6 +69,14 @@ foreach ($v in $Versions) {
     }
 
     $files = Get-ChildItem (Join-Path $Repo "plugins") -File -Filter *.py
+    $stale = @()
+    if (Test-Path $dst) {
+        $stale = Get-ChildItem $dst -File -Filter *.py | Where-Object { $files.Name -notcontains $_.Name }
+    }
+    foreach ($s in $stale) {
+        Write-Host "    remove stale $($s.Name)" -ForegroundColor Yellow
+        if (-not $WhatIf) { Remove-Item $s.FullName -Force }
+    }
     foreach ($f in $files) {
         Write-Host "    $($f.Name)" -ForegroundColor Gray
         if (-not $WhatIf) { Copy-Item $f.FullName (Join-Path $dst $f.Name) -Force }

@@ -74,8 +74,8 @@ Dialog substrate values override the KiCad physical stackup in the simulation mo
 | Setting | Meaning |
 |---|---|
 | CPU threads | openEMS worker threads. Auto lets RFsim choose. |
-| Mesh resolution | Coarse, Medium, Fine: 10, 20, 40 cells per shortest substrate wavelength. |
-| Domain margin | Margin in mm. RFsim uses one margin-width as PML and one adjacent margin-width as intended clear space. |
+| Mesh resolution | Coarse, Medium, Fine, Ultrafine: 10, 20, 40, 80 cells per shortest substrate wavelength. Ultrafine has 8 times the cells of Fine and half the timestep (about 16 times the work); use it to confirm convergence or for features much smaller than the wavelength, with the port-focused subregion. See the README, *The Ultrafine preset*. |
+| Domain margin | Clear air around the structure, in mm. The PML absorber is added outside it and is 8 mesh cells deep (it follows the mesh preset and the top of the sweep, so it is thinner at Ultrafine). |
 | Max steps | Maximum FDTD iterations. |
 | End criteria | Energy ratio at which openEMS stops. Smaller values run longer. |
 | Timestep | Fraction of Courant timestep. Leave empty for automatic selection; use 0.5 or 0.25 for a stiff lumped network. |
@@ -86,7 +86,7 @@ A small-timestep warning means a longer simulation. `Energy: nan` or `Energy: in
 
 ## Subregion
 
-Enable **Export port-focused rectangular subregion** for a local interconnect study. RFsim forms a rectangle from the union of selected pad bounds and expands every side by twice Domain margin. It exports only copper, vias, and eligible R/L/C footprints intersecting that rectangle.
+Enable **Export port-focused rectangular subregion** for a local interconnect study. RFsim forms a rectangle from the union of selected pad bounds and expands every side by the Domain margin plus the PML depth (8 mesh cells). It exports the copper and vias that intersect that rectangle; R/L/C footprints are taken only from the port box plus the clear-air margin (not from the PML band).
 
 The Subregion tab reports port bounds, export bounds, and component candidates. **View Exported Geometry** writes `geometry_preview.xml` and opens it in AppCSXCAD without running FDTD.
 
@@ -139,3 +139,13 @@ The results viewer can save a selected E/H field as GIF and export XDMF plus HDF
 - [KEMET K-SIM](https://ksim.kemet.com/)
 - [Murata SimSurfing](https://ds.murata.co.jp/simsurfing/en-us/)
 - [ParaView documentation](https://docs.paraview.org/)
+
+## Checks in the log
+
+| Message | Meaning |
+|---|---|
+| `Unused primitive (type: LinPoly) ... cu_<layer>` many times | Copper sheets that have no mesh line on their z are not metal. The run is not valid. Update the plugin (the copper planes are anchors of the z mesh) and check the stackup. |
+| `Port N (...): the nearer layer X has copper under only n% of the pad, so the port uses Y` | The reference layer of the port was chosen from the real copper under the pad. A long lumped port adds inductance; consider a Coplanar (CPW) port. |
+| `port N: there is little or NO copper on the reference layer` | The port resistor ends in air and the port reads as an open circuit. |
+| `lumped R1: end n of the element box is not on copper` | The part does not connect its pads. |
+| `the run stopped at the step limit ... before its end criteria` | The result is not complete. Raise Max steps or fix the cause (resonance, port, mesh). |

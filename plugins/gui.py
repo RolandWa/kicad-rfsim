@@ -141,21 +141,46 @@ def _entry_text(kind, value_si):
     return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
-def _port_subregion_bounds(ports, margin_mm):
-    """Give the rectangular export bounds derived from the selected ports."""
+def _port_raw_bounds(ports):
+    """Give the union box of the selected port pads: (x0, x1, y0, y1)."""
     if not ports:
         return None
     x0 = min(p["x"] - 0.5 * p["length"] for p in ports)
     x1 = max(p["x"] + 0.5 * p["length"] for p in ports)
     y0 = min(p["y"] - 0.5 * p["width"] for p in ports)
     y1 = max(p["y"] + 0.5 * p["width"] for p in ports)
-    margin = 2.0 * float(margin_mm)
+    return x0, x1, y0, y1
+
+
+def _port_subregion_bounds(ports, margin_mm, pml_mm=None):
+    """Give the export bounds of the copper: the port box plus the margin of
+    clear air plus the PML band (`pml_mm`; the margin when it is None, which
+    is the rule from before the PML depth followed the mesh)."""
+    raw = _port_raw_bounds(ports)
+    if raw is None:
+        return None
+    m = float(margin_mm)
+    margin = m + (m if pml_mm is None else float(pml_mm))
+    x0, x1, y0, y1 = raw
     return x0 - margin, x1 + margin, y0 - margin, y1 + margin
 
 
+def _port_part_bounds(ports, margin_mm):
+    """Give the box in which R/L/C parts are modelled: the port box plus the
+    margin of clear air. A part inside the absorbing PML band has no
+    meaning, and a remote part (a 10 uF reservoir far from the RF path)
+    only makes the run slower, so the band is left out here."""
+    raw = _port_raw_bounds(ports)
+    if raw is None:
+        return None
+    m = float(margin_mm)
+    x0, x1, y0, y1 = raw
+    return x0 - m, x1 + m, y0 - m, y1 + m
+
+
 def _element_in_port_subregion(element, ports, margin_mm):
-    """Tell whether a lumped-element box intersects the port subregion."""
-    bounds = _port_subregion_bounds(ports, margin_mm)
+    """Tell whether a lumped-element box intersects the part box."""
+    bounds = _port_part_bounds(ports, margin_mm)
     if bounds is None:
         return False
     rx0, rx1, ry0, ry1 = bounds
@@ -165,22 +190,20 @@ def _element_in_port_subregion(element, ports, margin_mm):
     return ex1 >= rx0 and ex0 <= rx1 and ey1 >= ry0 and ey0 <= ry1
 
 
-def _port_subregion_text(ports, margin_mm, lumped=()):
-    """Give the approximate port-bbox export bounds shown in the dialog."""
-    bounds = _port_subregion_bounds(ports, margin_mm)
+def _port_subregion_text(ports, margin_mm, lumped=(), pml_mm=None):
+    """Give the port-bbox export bounds shown in the dialog."""
+    bounds = _port_subregion_bounds(ports, margin_mm, pml_mm)
     if bounds is None:
         return "No selected ports."
     rx0, rx1, ry0, ry1 = bounds
-    margin = 2.0 * float(margin_mm)
-    x0, x1, y0, y1 = rx0 + margin, rx1 - margin, ry0 + margin, ry1 - margin
-    refs = []
-    for element in lumped:
-        if _element_in_port_subregion(element, ports, margin_mm):
-            refs.append(element["ref"])
+    x0, x1, y0, y1 = _port_raw_bounds(ports)
+    refs = [e["ref"] for e in lumped
+            if _element_in_port_subregion(e, ports, margin_mm)]
     chosen = ", ".join(refs) if refs else "none"
     return ("Port bounds: X %.2f..%.2f mm, Y %.2f..%.2f mm\n"
-            "Export bounds: X %.2f..%.2f mm, Y %.2f..%.2f mm\n"
-            "R/L/C candidates in export: %s"
+            "Export bounds (copper, with margin and PML): X %.2f..%.2f mm, "
+            "Y %.2f..%.2f mm\n"
+            "R/L/C candidates (port box plus margin): %s"
             % (x0, x1, y0, y1, rx0, rx1, ry0, ry1, chosen))
 
 
@@ -1240,8 +1263,13 @@ class SettingsDialog(wx.Dialog):
         self._redraw_preview()
 
     def _on_subregion_change(self, evt):
+        try:
+            pml = self._pml_mm()
+        except (AttributeError, ValueError):  # a field is not built yet, or empty
+            pml = None
         self.subregion_info.SetLabel(_port_subregion_text(
-            self._preview_ports, self.margin.GetValue(), self._preview_lumped))
+            self._preview_ports, self.margin.GetValue(), self._preview_lumped,
+            pml))
         self.Layout()
         evt.Skip()
 

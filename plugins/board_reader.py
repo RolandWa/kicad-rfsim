@@ -886,6 +886,9 @@ def _touches(polys, box):
 # A reference layer must have copper under at least this fraction of the pad
 # for a Lumped or Microstrip port to have a return path there.
 REF_MIN_COVER = 0.5
+# An ADJACENT layer needs less: an antenna feed sits at the edge of its
+# ground pour, and only a part of the pad is over copper there.
+REF_MIN_COVER_ADJ = 0.25
 
 
 def _covered(polys, x, y):
@@ -909,6 +912,41 @@ def _coverage(polys, box, n=5):
             y = y0 + (y1 - y0) * (j + 0.5) / n
             on += _covered(polys, x, y)
     return on / float(n * n)
+
+
+def _near_copper(polys, box, tol=0.1):
+    """Tell if copper is within `tol` mm of the box (a 7 x 7 grid on the box
+    widened by tol). A pad at the very edge of a pour has no sample point
+    over copper, but it is not a void."""
+    x0, y0, x1, y1 = box
+    return _coverage(polys, (x0 - tol, y0 - tol, x1 + tol, y1 + tol), 7) > 0.0
+
+
+def _choose_ref(names, idx, cover):
+    """Pick the reference layer of a port. Returns (ref, skipped).
+
+    `names` are the copper layers from the top, `idx` is the layer of the
+    pad and `cover[name]` the share of the pad over copper of each other
+    layer. The nearest layer wins; a tie goes toward B.Cu. An adjacent layer
+    needs `REF_MIN_COVER_ADJ` of the pad, a farther one `REF_MIN_COVER`. If
+    no layer qualifies, the layer with the MOST copper is used (nearest, then
+    toward B.Cu, on a tie) and not simply the one below. `skipped` lists the
+    nearer layers that were passed over, with their coverage.
+    """
+    others = [n for n in names if n != names[idx]]
+    dist = {n: abs(names.index(n) - idx) for n in others}
+    order = sorted(others, key=lambda n: (dist[n], 0 if names.index(n) > idx else 1))
+
+    def good(n):
+        return cover[n] >= (REF_MIN_COVER_ADJ if dist[n] == 1 else REF_MIN_COVER)
+
+    ok = [n for n in order if good(n)]
+    if ok:
+        ref = ok[0]
+    else:
+        ref = max(order, key=lambda n: (cover[n], -dist[n], names.index(n) > idx))
+    skipped = [(n, cover[n]) for n in order if dist[n] < dist[ref]]
+    return ref, skipped
 
 
 def _pad_box(pad):
@@ -1181,17 +1219,8 @@ def _port(board, pad, number, copper_layers, polygons):
     box = _pad_box(pad)
     others = [n for n in names if n != layer_name]
     cover = {n: _coverage(polygons.get(n, []), box) for n in others}
-    order = sorted(others, key=lambda n: (abs(names.index(n) - idx),
-                                          0 if names.index(n) > idx else 1))
-    good = [n for n in order if cover[n] >= REF_MIN_COVER]
-    down = names[idx + 1] if idx < len(names) - 1 else None
-    up = names[idx - 1] if idx > 0 else None
-    if good:
-        ref = good[0]
-    else:  # no layer qualifies: keep the old choice, extract() will warn
-        ref = down if down is not None else up
-    skipped = [(n, cover[n]) for n in order
-               if abs(names.index(n) - idx) < abs(names.index(ref) - idx)]
+    ref, skipped = _choose_ref(names, idx, cover)
+    ref_touch = _near_copper(polygons.get(ref, []), box)
 
     # A stripline must have a plane above the strip and a plane below it.
     # Thus the port must be on an inner layer. openEMS puts the voltage
@@ -1225,6 +1254,7 @@ def _port(board, pad, number, copper_layers, polygons):
         "layer": layer_name,
         "ref_layer": ref,
         "ref_layer2": ref2,      # the second plane of a stripline
+        "ref_touch": ref_touch,  # copper within 0.1 mm of the pad (pour edge)
         "ref_coverage": round(cover[ref], 3),   # share of the pad on copper of ref_layer
         "ref_skipped": [[n, round(c, 3)] for n, c in skipped],  # nearer layers without copper
         "height": height,        # strip to each plane, mm; None = no stripline
@@ -1297,6 +1327,13 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         pml_mm = solverenv.pml_depth(
             solverenv.mesh_res(f_stop, eps_max, mesh))
     region.Inflate(pcbnew.FromMM(margin_mm + pml_mm))
+    # R/L/C parts: the port box plus the clear-air margin, not the PML band.
+    # On a full board every part of the board is inside the domain anyway.
+    if full_board:
+        part_region = pcbnew.BOX2I(region.GetPosition(), region.GetSize())
+    else:
+        part_region = pcbnew.BOX2I(port_box.GetPosition(), port_box.GetSize())
+        part_region.Inflate(pcbnew.FromMM(margin_mm))
 
     brd_box = board.GetBoardEdgesBoundingBox()
     diel_box = region.Intersect(brd_box)
@@ -1422,14 +1459,15 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                    p["ref_layer"], 100.0 * p["ref_coverage"],
                    abs(z_by_name[p["layer"]] - z_by_name[p["ref_layer"]])))
             break
-        if 0.0 < p["ref_coverage"] < REF_MIN_COVER:
+        if (p["ref_coverage"] < REF_MIN_COVER
+                and (p["ref_coverage"] > 0.0 or p.get("ref_touch"))):
             warnings.append(
                 "Port %d (%s): only %.0f%% of the pad is over copper of the "
                 "reference layer %s. The port may be at the edge of a "
                 "pour; check the S-parameters."
                 % (p["number"], p["label"], 100.0 * p["ref_coverage"],
                    p["ref_layer"]))
-        if p["ref_coverage"] <= 0.0:
+        if p["ref_coverage"] <= 0.0 and not p.get("ref_touch"):
             # The return current of a CPW is on the coplanar ground of its
             # own layer. Thus a board with no plane below the pad is
             # correct for a CPW port, and the guard must not stop it. A CPW
@@ -1460,7 +1498,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # port pad is the port, not a different element. Thus ignore its
     # footprint.
     port_refs = {pad.GetParentFootprint().GetReference() for pad in pads}
-    lumped, le_warn, notes = _lumped_elements(board, region, copper_layers,
+    lumped, le_warn, notes = _lumped_elements(board, part_region, copper_layers,
                                               port_refs)
     warnings += le_warn
 

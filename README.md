@@ -2,7 +2,7 @@
 
 # RFsim
 
-Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver.
+Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0 (KiCad 9.0 is installed by `sync_to_kicad.ps1`, see *KiCad 9 and KiCad 10* below), with the [openEMS](https://openems.de) FDTD solver.
 The geometry goes from the native board objects of KiCad to the primitives of CSXCAD.
 
 See the [RFsim Settings Guide](docs/RFSIM_SETTINGS.md) for a field-by-field
@@ -137,7 +137,7 @@ When the loss is important, put the center of the sweep at the frequency that ma
 
 The domain is the board, the margin of air around it, and an absorber 8 cells deep. Copper that crosses the outer edge ends in the absorber and does not reflect.
 
-The **Subregion** tab can instead enable **Export port-focused rectangular subregion**. This uses the bounding box of the selected port pads and expands every side by twice the Domain margin: one margin-width is clear air and the other is the PML absorber. Only copper, vias, and eligible two-terminal R/L/C components that intersect this rectangle are exported. The solver log records the chosen scope, bounds, geometry counts, and R/L/C references. Use full-board mode for antennas, radiating structures, and any analysis where remote board geometry contributes to the result.
+The **Subregion** tab can instead enable **Export port-focused rectangular subregion**. This uses the bounding box of the selected port pads and expands every side by the Domain margin (clear air) **plus the depth of the PML band** (8 cells of the mesh step, so it depends on the top of the sweep and the mesh preset; the Subregion tab shows the real bounds). Copper and vias that intersect this rectangle are exported. **Two-terminal R/L/C components are taken only from the port box plus the clear-air margin**, not from the absorbing band, so remote parts (a bulk capacitor far from the RF path) do not slow the run down. The solver log records the chosen scope, bounds, geometry counts, and R/L/C references. Use full-board mode for antennas, radiating structures, and any analysis where remote board geometry contributes to the result.
 
 ### Accuracy
 
@@ -153,6 +153,17 @@ The mesh preset sets the cells for each wavelength, at the shortest wavelength o
 The preset sets only this step. The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
 
 The coarse preset is for a first look, and a small lumped element reads too large there. Use medium or fine when a number is important. For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
+
+#### The Ultrafine preset
+
+Ultrafine uses **80 cells per wavelength**: the step is half of the fine step, and the cell count is **8 times** that of fine (3 axes). The Courant timestep halves too, so a run takes about **16 times** the work of fine (time and memory). Choose it deliberately:
+
+* **Use it** to check that a result has converged (compare fine and ultrafine: the S-parameters should agree), for a structure with parts much smaller than the wavelength (a divider, a coupler, a connector launch, a thin dielectric), or when `Unused primitive`/"narrower than ... mm" warnings show that features of the copper are smaller than the fine step.
+* **Do not use it** for a first look, for a sweep with many ports (each excited port is a full run), or on a full board. Combine it with the **port-focused subregion** and a small domain margin, and excite only the ports you need.
+* The PML band and the clear-air standoff follow the mesh step (8 cells), so the domain gets smaller in mm at ultrafine; check the exported bounds in the log.
+* A run that has not reached the end criteria within **Max steps** is not complete. The log says so, and its S-parameters must not be used. The timestep is half of the fine one, so the same simulated time needs twice the steps; raise Max steps if the log reports the limit.
+* Memory grows with the cell count, so it is 8 times that of fine. Check the cell count in the log (`FDTD simulation size`) before you start.
+
 
 ### Lumped elements
 
@@ -195,12 +206,17 @@ Its row holds R in ohm, L in nH and C in pF, in series, with no parasitics. 0 le
 The fallback trend is informed by MLCC impedance data available through [KEMET K-SIM](https://ksim.kemet.com/) and [Murata SimSurfing](https://ds.murata.co.jp/simsurfing/en-us/). It is not an MPN-specific manufacturer model: ESR and ESL vary with capacitance, dielectric, voltage rating, DC bias, frequency, termination geometry, and test fixture. RFsim models PCB pads, tracks, and nearby via loops directly, so its table represents body-only ESL; copying a published mounted ESL value would double-count some board inductance. Use the per-component controls to enter values derived from the exact manufacturer part's impedance or S-parameter data.
 
 
+### KiCad 9 and KiCad 10
+
+The plugin targets KiCad 10 (`metadata.json`). `sync_to_kicad.ps1` also installs it into KiCad 9.0. The non-GUI parts (`board_reader`, `runner`, the tests in `validation/`) are tested under the Python of KiCad 9.0.9 and 10; **the dialog and the result viewer were not exercised in KiCad 9**. A `.kicad_pcb` that was saved by KiCad 10 may not open in KiCad 9: save the board with KiCad 9 for a run there. `validation/test_import_kicad.py` checks that every module imports in the Python of the installed KiCad.
+
 ### Port reference layer and lumped elements: what openEMS needs
 
 openEMS does not check these, and a violation gives a wrong answer with no message of its own. RFsim now checks them and writes a warning to the log:
 
 * **A lumped or microstrip port is a resistor from the pad down to its reference layer.** If that layer has no copper under the pad, the resistor ends in air, no current flows, and the port reads as an open circuit (S = +1). Voided inner planes under an RF line (for example to lower the capacitance of a connector pad) cause exactly this.
 * **The reference layer is therefore picked from the copper that is really under the pad** (`board_reader._coverage`, a test on the true outline, not on the bounding box). The nearest layer with at least 50% of the pad covered is used; on a tie, the layer toward B.Cu. When a nearer layer is skipped, the log says so, with the distance of the port. A long lumped port adds series inductance. With coplanar ground on the signal layer, a **Coplanar (CPW)** port models the return better.
+* **Every copper plane must lie exactly on a mesh line in z.** openEMS prints only `Unused primitive (type: LinPoly)` for a copper sheet that has no line on it, and the sheet is then NOT metal. A thin dielectric (a 0.1 mm prepreg) used to make the mesh merge move the plane lines, and all the copper of a run disappeared. The copper z values are now anchors of the merge (`validation/test_copper_lines.py`). If you still see `Unused primitive` for many polygons in the log, the run is not valid.
 * The runner repeats the test on the exported `model.json` (`runner._geometry_warnings`), so a model that was edited by hand, or made by an older version, is checked too.
 * **A lumped element (R, L, C) is a box on the main axes of the grid.** It must have both ends on copper, and the box must not be rotated or off the mesh lines (openEMS-Project discussion 186: rotated resistors had no effect). RFsim puts each part on the x or y axis and warns when an end of the box is not on copper.
 

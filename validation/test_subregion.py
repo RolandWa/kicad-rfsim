@@ -33,8 +33,22 @@ def test_port_bounds_include_the_pml_margin():
         assert abs(actual - expected) < 1e-9, (bounds, want)
     text = gui._port_subregion_text(PORTS, 3.5)
     assert "Port bounds: X 134.43..148.21 mm" in text, text
-    assert "Export bounds: X 127.43..155.21 mm" in text, text
+    assert "X 127.43..155.21 mm" in text, text
     print("subregion bounds OK")
+
+
+def test_pml_band_is_in_the_copper_bounds_but_not_in_the_part_box():
+    """Copper goes to the port box + margin + PML; parts only to + margin."""
+    margin, pml = 3.5, 10.0
+    copper = gui._port_subregion_bounds(PORTS, margin, pml)
+    parts = gui._port_part_bounds(PORTS, margin)
+    assert abs((copper[1] - parts[1]) - pml) < 1e-9, (copper, parts)
+    assert gui._port_subregion_bounds(PORTS, margin) ==         gui._port_subregion_bounds(PORTS, margin, margin)
+    far = element("C5", [148.2 + margin + 4.0, -85.0, 1.6], [148.2 + margin + 4.5, -85.0, 1.6])
+    # 4 mm beyond the part box: inside the PML band, so it is not modelled
+    assert not gui._element_in_port_subregion(far, PORTS, margin)
+    assert copper[1] > far["start"][0]
+    print("part box excludes the PML band OK")
 
 
 def test_filter_includes_local_part_and_excludes_r13():
@@ -48,5 +62,6 @@ def test_filter_includes_local_part_and_excludes_r13():
 
 if __name__ == "__main__":
     test_port_bounds_include_the_pml_margin()
+    test_pml_band_is_in_the_copper_bounds_but_not_in_the_part_box()
     test_filter_includes_local_part_and_excludes_r13()
     print("PASS")
